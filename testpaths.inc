@@ -28,6 +28,26 @@ $RESPONSES = array(
 }
 EJSON
     ),
+    "ping" => array(
+        "headers" => array(
+            /* std header */
+            "messageLength"  => 0,
+            "requestID"      => 0,
+            "responseTo"     => 0,
+            "opCode"         => 0,
+
+            /* OP_REPLY */
+            "responseFlags"  => 0,
+            "cursorID"       => 0,
+            "startingFrom"   => 0,
+            "numberReturned" => 1,
+        ),
+        "content" => <<< 'EJSON'
+{
+        "ok" : 1
+}
+EJSON
+    ),
 );
 
 

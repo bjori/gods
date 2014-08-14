@@ -155,17 +155,6 @@ function makeMessageHeader($len, $reqid, $replyid, $flags, $cursorid, $starts, $
     $header = pack("VVVVVV2VV", $len, $reqid, $replyid, OP_REPLY, $flags, $cursorid >> 32, $cursorid & 0xffffffff, $starts, $total);
     return $header;
 }
-function getMessageHeader($conn) {
-    d(FENTRY, __METHOD__);
-    pad("PARSING PACKET");
-
-    $data = read($conn, MESSAGE_HEADER_LEN);
-    $headers = unpack('VmessageLength/VrequestId/VresponseTo/Vopcode', $data);
-
-    d(EJSON, json_encode($headers, JSON_PRETTY_PRINT));
-    return $headers;
-}
-
 function getQueryHeaders($data, &$currentpos = 0) {
     d(FENTRY, __METHOD__);
     /* find the end of the cstring+\0, skipping the flags(int32)*/
@@ -190,7 +179,9 @@ function runQuery($messageh, $queryh, $v) {
 
     $array = BSON\toJSON($v);
     d(EJSON, $array);
-    $response = $RESPONSES["isMaster"];
+    $array = BSON\toArray($v);
+    var_dump($array);
+    $response = $RESPONSES[key($array)];
     return $response;
 }
 function replyTo($conn, $in, $reply) {
@@ -219,20 +210,91 @@ function dealWithQuery($conn, $headers) {
     replyTo($conn, $headers, $reply);
 
 }
+abstract class Server {
+    abstract function getBootstrapSteps();
 
+    function getMessageHeader() {
+        d(FENTRY, __METHOD__);
+        pad("PARSING PACKET");
+
+        $data = read($this->conn, MESSAGE_HEADER_LEN);
+        $headers = unpack('VmessageLength/VrequestId/VresponseTo/Vopcode', $data);
+
+        d(EJSON, json_encode($headers, JSON_PRETTY_PRINT));
+        return $headers;
+    }
+
+}
+class StandaloneServer extends Server {
+    protected $conn;
+
+    function __construct($conn) {
+        $this->conn = $conn;
+    }
+
+    function getBootstrapSteps() {
+        return 2;
+    }
+    function opQuery($headers) {
+        $data = read($this->conn, $headers["messageLength"]-MESSAGE_HEADER_LEN);
+        $queryHeaders = getQueryHeaders($data, $pos);
+        $v = substr($data, $pos);
+        hex_dump_wrap($v);
+
+        return $this->runQuery($headers, $queryHeaders, $v);
+    }
+    function runQuery($headers, $queryHeaders, $q) {
+        pad("EXECUTE REQUEST");
+        $reply = runQuery($headers, $queryHeaders, $q);
+        return $reply;
+    }
+    function opReply($headers, $reply) {
+        pad("REPLY TO REQUEST");
+        return replyTo($this->conn, $headers, $reply);
+    }
+    function bootstrapped() {
+        return true;
+    }
+
+    function getTestSuite() {
+        $headers = $this->getMessageHeader();
+        if ($headers["opcode"] != OP_QUERY) {
+            throw InvalidArgumentException("Expected OP_QUERY when picking testsuite to run");
+        }
+        pad("Fetching TEST SUITE");
+        $result = $this->opQuery($headers);
+        sleep(10);
+        if ($result) {
+            $this->opReply($headers, $result);
+        }
+    }
+}
 function handleConnection($conn) {
     d(FENTRY, __METHOD__);
 
-    do {
-        $headers = getMessageHeader($conn);
-
+    $standalone = new StandaloneServer($conn);
+    if (bootstrap($standalone)) {
+        $suite = $standalone->getTestSuite();
+        var_dump($suite);
+    }
+}
+function bootstrap(Server $server) {
+    $steps = $server->getBootstrapSteps();
+    for($i=0; $i<$steps; $i++) {
+        $headers = $server->getMessageHeader();
         switch($headers["opcode"]) {
         case OP_QUERY:
-            dealWithQuery($conn, $headers);
+            $result = $server->opQuery($headers);
+            if ($result) {
+                $server->opReply($headers, $result);
+            }
             break;
         }
-        d(DMSG,"Finshed one opcode");
-    } while(1);
+    }
+    if (!$server->bootstrapped()) {
+        return false;
+    }
+    return true;
 }
 
 $socket = stream_socket_server("tcp://0.0.0.0:8000", $errno, $errstr);
