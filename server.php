@@ -12,8 +12,9 @@ define("FATAL", 6);
 define("WARN", 4);
 define("HDUMP", 5);
 define("EJSON", 6);
-define("OFF", 7);
-define("DEBUG_LEVEL", 6);
+define("TDESC", 7);
+define("OFF", 8);
+define("DEBUG_LEVEL", 4);
 
 /* Stolen from the intertubes */
 function hex_dump($data)
@@ -47,24 +48,17 @@ function hex_dump($data)
     }
 }
 
-function pad($txt) {
+function pad($txt = "") {
     $len = strlen($txt);
-    $pad = 80-$len-2;
+    $pad = 80-$len-($len ? 2 : 0);
     $sides = floor($pad / 2);
     echo str_repeat("=", $sides);
-    echo " ", $txt, " ";
+    echo $txt ? " " . $txt . " " : "";
     if ($pad % 2) {
         echo "=";
     }
     echo str_repeat("=", $sides);
     echo "\n";
-}
-function hex_dump_wrap($d) {
-    if (HDUMP > DEBUG_LEVEL) {
-        echo str_repeat("=", 80), "\n";
-        hex_dump($d);
-        echo str_repeat("=", 80), "\n";
-    }
 }
 function level2name($level) {
     switch($level) {
@@ -79,13 +73,44 @@ function level2name($level) {
 }
 function d($level, $txt) {
     if ($level >= DEBUG_LEVEL) {
-        $prefix = str_repeat("\t", $level-1);
-        echo $prefix . "[" . level2name($level). "] ";
+        $prefix = str_repeat("\t", (OFF-1)-$level);
+        switch($level) {
+        case FENTRY:
+        case DMSG:
+            $header = $prefix . "[" . level2name($level). "] ";
+            break;
+        case EJSON:
+        default:
+            $header = "";
+        }
+
+        echo $header;
         echo str_replace("\n", "\n$prefix", $txt), "\n";
     }
 }
+function jd($data) {
+    if (is_string($data)) {
+        $data = json_encode(json_decode($data), JSON_PRETTY_PRINT);
+    } else {
+        $data = json_encode($data, JSON_PRETTY_PRINT);
+    }
+    return d(EJSON, $data);
+}
+function hd($d, $title = "") {
+    if (HDUMP > DEBUG_LEVEL) {
+        pad($title);
+        hex_dump($d);
+        pad();
+    }
+}
 
-function read($conn, $bytes) {
+function td($n, $title = "") {
+    if (TDESC > DEBUG_LEVEL) {
+        pad("test#$n: $title");
+    }
+}
+
+function read($conn, $bytes, $label = "") {
     d(FENTRY, __METHOD__);
     $consumed = 0;
     $data = "";
@@ -111,11 +136,11 @@ function read($conn, $bytes) {
         }
     } while($consumed < $bytes);
 
-    hex_dump_wrap($data);
+    hd($data, $label);
     return $data;
 }
 
-function write($conn, $data) {
+function write($conn, $data, $label = "") {
     d(FENTRY, __METHOD__);
 
     $data_len = strlen($data);
@@ -133,14 +158,13 @@ function write($conn, $data) {
     $written = fputs($conn, $data, $data_len);
     d(DMSG, "wrote $written");
 
-    hex_dump_wrap($data);
+    hd($data, $label);
     return $data;
 }
 
 function makeMessageHeader($len, $reqid, $replyid, $flags, $cursorid, $starts, $total) {
     d(FENTRY, __METHOD__);
-    pad("CREATING PACKET");
-    d(EJSON, json_encode(array(
+    jd(array(
         "header"=> array(
             "messageLength" => $len,
             "requestID" => $reqid,
@@ -151,7 +175,7 @@ function makeMessageHeader($len, $reqid, $replyid, $flags, $cursorid, $starts, $
         "cursorID" => $cursorid,
         "startingFrom" => $starts,
         "numberReturned" => $total,
-    ), JSON_PRETTY_PRINT));
+    ));
     $header = pack("VVVVVV2VV", $len, $reqid, $replyid, OP_REPLY, $flags, $cursorid >> 32, $cursorid & 0xffffffff, $starts, $total);
     return $header;
 }
@@ -169,62 +193,46 @@ function getQueryHeaders($data, &$currentpos = 0) {
 
     $currentpos = $pos+8;
     $retval = array_merge($headers, $headers2);
-    d(EJSON, json_encode($retval, JSON_PRETTY_PRINT));
     return $retval;
 }
 
-function runQuery($messageh, $queryh, $v) {
-    d(FENTRY, __METHOD__);
-    global $RESPONSES;
-
-    $array = BSON\toJSON($v);
-    d(EJSON, $array);
-    $array = BSON\toArray($v);
-    var_dump($array);
-    $response = $RESPONSES[key($array)];
-    return $response;
-}
-function replyTo($conn, $in, $reply) {
-    d(FENTRY, __METHOD__);
-
-    $bson = BSON\fromJSON($reply["content"]);
-    $bson_len = strlen($bson);
-    d(EJSON, $reply["content"]);
-
-    $bin = makeMessageHeader($bson_len+REPLY_HEADER_LEN, 42, $in["requestId"], 0, 0, 0, 1);
-    write($conn, $bin);
-    write($conn, $bson);
-}
-
-function dealWithQuery($conn, $headers) {
-    d(FENTRY, __METHOD__);
-
-    $data = read($conn, $headers["messageLength"]-MESSAGE_HEADER_LEN);
-    $queryHeaders = getQueryHeaders($data, $pos);
-    $v = substr($data, $pos);
-    hex_dump_wrap($v);
-
-    pad("EXECUTE REQUEST");
-    $reply = runQuery($headers, $queryHeaders, $v);
-    pad("REPLY TO REQUEST");
-    replyTo($conn, $headers, $reply);
-
-}
 abstract class Server {
     abstract function getBootstrapSteps();
 
     function getMessageHeader() {
         d(FENTRY, __METHOD__);
-        pad("PARSING PACKET");
 
-        $data = read($this->conn, MESSAGE_HEADER_LEN);
+        $data = read($this->conn, MESSAGE_HEADER_LEN, "MSG HEADER");
         $headers = unpack('VmessageLength/VrequestId/VresponseTo/Vopcode', $data);
 
-        d(EJSON, json_encode($headers, JSON_PRETTY_PRINT));
         return $headers;
     }
+    function getOpcode() {
+        d(FENTRY, __METHOD__);
+        echo "\n";
+        pad("PARSING OPCODE");
 
+        $msgheaders = $this->getMessageHeader();
+        $data = read($this->conn, $msgheaders["messageLength"]-MESSAGE_HEADER_LEN, "OPCODE");
+
+        switch($msgheaders["opcode"]) {
+            case OP_QUERY:
+                $opcode = getQueryHeaders($data, $pos);
+                /* inject the msgheaders at the beginning of the assoc array */
+                $opcode = array_merge(array("header" => $msgheaders), $opcode);
+
+                $querydoc = substr($data, $pos);
+                $opcode["document"] = BSON\toArray($querydoc);
+                break;
+            default:
+                var_dump($msgheaders);
+        }
+
+        jd($opcode);
+        return $opcode;
+    }
 }
+
 class StandaloneServer extends Server {
     protected $conn;
 
@@ -235,61 +243,98 @@ class StandaloneServer extends Server {
     function getBootstrapSteps() {
         return 2;
     }
-    function opQuery($headers) {
-        $data = read($this->conn, $headers["messageLength"]-MESSAGE_HEADER_LEN);
-        $queryHeaders = getQueryHeaders($data, $pos);
-        $v = substr($data, $pos);
-        hex_dump_wrap($v);
-
-        return $this->runQuery($headers, $queryHeaders, $v);
+    function executeOpcode($opcode) {
+        switch($opcode["header"]["opcode"]) {
+        case OP_QUERY:
+            $response = $this->opQuery($opcode);
+            return $this->opReply($opcode, $response);
+        }
     }
-    function runQuery($headers, $queryHeaders, $q) {
+    function opQuery($opcode) {
         pad("EXECUTE REQUEST");
-        $reply = runQuery($headers, $queryHeaders, $q);
-        return $reply;
+        global $RESPONSES;
+
+        $data = $opcode["document"];
+        jd($data);
+        $response = $RESPONSES[BSON\toJSON(BSON\fromArray($data))];
+
+        return $response;
     }
-    function opReply($headers, $reply) {
-        pad("REPLY TO REQUEST");
-        return replyTo($this->conn, $headers, $reply);
+    function opReply($opcode, $reply) {
+        d(FENTRY, __METHOD__);
+
+        $bson = BSON\fromJSON($reply["content"]);
+        $bson_len = strlen($bson);
+
+        echo "\n";
+        pad("SENDING OP_REPLY");
+        $bin = makeMessageHeader($bson_len+REPLY_HEADER_LEN, 42, $opcode["header"]["requestId"], 0, 0, 0, 1);
+        jd($reply["content"]);
+        write($this->conn, $bin, "HEADER");
+        write($this->conn, $bson, "BSON REPLY");
+
+        return $reply["content"];
     }
     function bootstrapped() {
         return true;
     }
 
     function getTestSuite() {
-        $headers = $this->getMessageHeader();
-        if ($headers["opcode"] != OP_QUERY) {
-            throw InvalidArgumentException("Expected OP_QUERY when picking testsuite to run");
-        }
         pad("Fetching TEST SUITE");
-        $result = $this->opQuery($headers);
-        sleep(10);
-        if ($result) {
-            $this->opReply($headers, $result);
-        }
+        $opcode = $this->getOpcode();
+        $result = $this->executeOpcode($opcode);
+
+        return $result;
+    }
+}
+function matchOpcodeWithTest($opcode, $test) {
+    var_dump($opcode);
+    var_dump($test);
+    return true;
+}
+function ok($responseId) {
+$str = <<< 'EJSON'
+{
+    "ok" : 1
+}
+EJSON;
+    opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
+}
+function fail($responseId) {
+$str = <<< 'EJSON'
+{
+    "ok" : 0
+}
+EJSON;
+    opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
+}
+function runTest($n, $test, Server $server) {
+    td($n, $test->description);
+    $opcode = $server->getOpcode();
+    if (matchOpcodeWithTest($opcode, $test)) {
+        return ok($opcode["header"]["requestId"]);
+    } else {
+        return fail($opcode["header"]["requestId"]);
     }
 }
 function handleConnection($conn) {
     d(FENTRY, __METHOD__);
 
     $standalone = new StandaloneServer($conn);
-    if (bootstrap($standalone)) {
-        $suite = $standalone->getTestSuite();
-        var_dump($suite);
+    if (!bootstrap($standalone)) {
+        echo "This guy failed.\n";
+    }
+    $suite = $standalone->getTestSuite();
+    $suite = BSON\toArray(BSON\fromJSON($suite));
+    foreach($suite["tests"] as $n => $test) {
+        runTest($n, $test, $standalone);
     }
 }
 function bootstrap(Server $server) {
     $steps = $server->getBootstrapSteps();
     for($i=0; $i<$steps; $i++) {
-        $headers = $server->getMessageHeader();
-        switch($headers["opcode"]) {
-        case OP_QUERY:
-            $result = $server->opQuery($headers);
-            if ($result) {
-                $server->opReply($headers, $result);
-            }
-            break;
-        }
+        $opcode = $server->getOpcode();
+        $retval = $server->executeOpcode($opcode);
     }
     if (!$server->bootstrapped()) {
         return false;
@@ -307,6 +352,7 @@ if (!$socket) {
 while ($conn = stream_socket_accept($socket)) {
     handleConnection($conn);
     fclose($conn);
+    break;
 }
 
 fclose($socket);
