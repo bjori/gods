@@ -13,7 +13,8 @@ define("WARN", 4);
 define("HDUMP", 5);
 define("EJSON", 6);
 define("TDESC", 7);
-define("OFF", 8);
+define("TOUT", 8);
+define("OFF", 9);
 define("DEBUG_LEVEL", 4);
 
 /* Stolen from the intertubes */
@@ -114,6 +115,9 @@ function read($conn, $bytes, $label = "") {
     d(FENTRY, __METHOD__);
     $consumed = 0;
     $data = "";
+
+    $left = 3;
+
     do {
         $read   = array($conn);
         $write  = NULL;
@@ -133,6 +137,13 @@ function read($conn, $bytes, $label = "") {
 
         if ($consumed == 0) {
             sleep(1);
+
+            if ($left-- > 0) {
+                d(TOUT, "Timing out in $left seconds");
+                continue;
+            }
+            d(TOUT, "Timed out reading $bytes");
+            break;
         }
     } while($consumed < $bytes);
 
@@ -183,7 +194,7 @@ function getQueryHeaders($data, &$currentpos = 0) {
     d(FENTRY, __METHOD__);
     /* find the end of the cstring+\0, skipping the flags(int32)*/
     $pos = strpos($data, 0x00, 4)+1;
-    $str = substr($data, 0, $pos);
+    $str = substr($data, 0, $pos-1);
 
     /* get the next two int32 */
     $ints = substr($data, $pos, 8);
@@ -203,16 +214,21 @@ abstract class Server {
         d(FENTRY, __METHOD__);
 
         $data = read($this->conn, MESSAGE_HEADER_LEN, "MSG HEADER");
-        $headers = unpack('VmessageLength/VrequestId/VresponseTo/Vopcode', $data);
-
-        return $headers;
+        if ($data) {
+            $headers = unpack('VmessageLength/VrequestId/VresponseTo/Vopcode', $data);
+            return $headers;
+        }
     }
+
     function getOpcode() {
         d(FENTRY, __METHOD__);
         echo "\n";
         pad("PARSING OPCODE");
 
         $msgheaders = $this->getMessageHeader();
+        if (!$msgheaders) {
+            return false;
+        }
         $data = read($this->conn, $msgheaders["messageLength"]-MESSAGE_HEADER_LEN, "OPCODE");
 
         switch($msgheaders["opcode"]) {
@@ -287,34 +303,52 @@ class StandaloneServer extends Server {
         return $result;
     }
 }
-function matchOpcodeWithTest($opcode, $test) {
-    var_dump($opcode);
-    var_dump($test);
-    return true;
+function matcheq($supposed, $got, &$errmsg = "") {
+    if (fnmatch($supposed, $got)) {
+        return true;
+    }
+
+    $errmsg = "'$supposed' != '$got'";
+    return false;
 }
-function ok($responseId) {
+function matchOpcodeWithTest($opcode, $test) {
+    $headers = $test->expect->headers;
+
+    if (!matcheq($headers->fullCollectionName, $opcode["fullCollectionName"], $errmsg)) {
+        return "fullCollectionName: " . $errmsg;
+    }
+    if (!matcheq($headers->numberToReturn, $opcode["numberToReturn"], $errmsg)) {
+        return "numberToReturn: " . $errmsg;
+    }
+}
+function ok($server, $responseId) {
 $str = <<< 'EJSON'
 {
     "ok" : 1
 }
 EJSON;
-    opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
+    $server->opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
 }
-function fail($responseId) {
-$str = <<< 'EJSON'
+function fail($server, $responseId, $errmsg) {
+$str = <<< EJSON
 {
+    "errmsg": "$errmsg",
     "ok" : 0
 }
 EJSON;
-    opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
+    $server->opReply(array("header" => array("requestId" => $responseId)), array("content" => $str));
 }
 function runTest($n, $test, Server $server) {
     td($n, $test->description);
     $opcode = $server->getOpcode();
-    if (matchOpcodeWithTest($opcode, $test)) {
-        return ok($opcode["header"]["requestId"]);
+    if (!$opcode) {
+        echo "Couldn't get opcode.. cancelling\n";
+        return false;
+    }
+    if ($errmsg = matchOpcodeWithTest($opcode, $test)) {
+        return fail($server, $opcode["header"]["requestId"], $errmsg);
     } else {
-        return fail($opcode["header"]["requestId"]);
+        return ok($server, $opcode["header"]["requestId"]);
     }
 }
 function handleConnection($conn) {
@@ -334,7 +368,12 @@ function bootstrap(Server $server) {
     $steps = $server->getBootstrapSteps();
     for($i=0; $i<$steps; $i++) {
         $opcode = $server->getOpcode();
-        $retval = $server->executeOpcode($opcode);
+        if ($opcode) {
+            $retval = $server->executeOpcode($opcode);
+        } else {
+            echo "Couldn't find opcode..\n";
+            break;
+        }
     }
     if (!$server->bootstrapped()) {
         return false;
@@ -351,8 +390,8 @@ if (!$socket) {
 
 while ($conn = stream_socket_accept($socket)) {
     handleConnection($conn);
+    echo "Closing connection\n";
     fclose($conn);
-    break;
 }
 
 fclose($socket);

@@ -67,9 +67,10 @@ EJSON
         
     "tests" : [
         {
+            "id": "GODS_1_part_1",
             "description" : "Insert this document into namespace: dbtest.colltest",
             "expect": {
-                "headers": { "opCode": 2004, "fullCollectionName": "dbtest.colltest", "numberToSkip": 0, "numberToReturn": 1 },
+                "headers": { "opCode": 2004, "fullCollectionName": "dbtest.$cmd", "numberToSkip": 0, "numberToReturn": 1 },
                 "data": {
                     "insert": "dbtest.colltest",
                     "writeConcern": { "w": 1 },
@@ -81,6 +82,7 @@ EJSON
             }
         },
         {
+            "id": "GODS_1_part_2",
             "description" : "findById() this document in namespace: dbtest.colltest",
             "expect": {
                 "headers": { "opCode": 2004, "fullCollectionName": "dbtest.colltest", "numberToSkip": 0, "numberToReturn": 1 },
